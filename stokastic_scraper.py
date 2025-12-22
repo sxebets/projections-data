@@ -27,6 +27,7 @@ class StokasticScraper:
         self.driver = None
         self.data_dir = 'data'
         self.history_dir = 'data/history'
+        self.download_dir = os.path.abspath(self.data_dir)
         self.scraped_data = {}
         
         # Create data directories
@@ -44,17 +45,22 @@ class StokasticScraper:
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         chrome_options.add_argument('--window-size=1920,1080')
         
-        # Set download preferences
+        # Get absolute path for downloads
+        self.download_dir = os.path.abspath(self.data_dir)
+        os.makedirs(self.download_dir, exist_ok=True)
+        
+        # Set download preferences - use absolute path
         prefs = {
-            'download.default_directory': os.path.abspath(self.data_dir),
+            'download.default_directory': self.download_dir,
             'download.prompt_for_download': False,
             'download.directory_upgrade': True,
+            'safebrowsing.enabled': True,
         }
         chrome_options.add_experimental_option('prefs', prefs)
         
         self.driver = webdriver.Chrome(options=chrome_options)
         self.wait = WebDriverWait(self.driver, 20)
-        print("✓ Browser initialized")
+        print(f"✓ Browser initialized (downloads to: {self.download_dir})")
     
     def login(self):
         """Login to Stokastic via Auth0"""
@@ -263,92 +269,211 @@ class StokasticScraper:
     def click_export_button(self):
         """Find and click the EXPORT button, return the CSV content"""
         try:
-            # Find EXPORT button
-            export_selectors = [
-                "//button[contains(text(), 'EXPORT')]",
-                "//button[contains(text(), 'Export')]",
-                "//a[contains(text(), 'EXPORT')]",
-                "//*[contains(@class, 'export')]",
-            ]
+            # Get list of existing CSV files before clicking
+            existing_files = set()
+            downloads_folder = os.path.join(os.path.expanduser('~'), 'Downloads')
+            for folder in [self.download_dir, downloads_folder]:
+                if os.path.exists(folder):
+                    existing_files.update([os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.csv')])
             
-            export_btn = None
-            for selector in export_selectors:
-                try:
-                    export_btn = self.driver.find_element(By.XPATH, selector)
-                    if export_btn and export_btn.is_displayed():
-                        print(f"  ✓ Found EXPORT button")
+            # Method 1: Use JavaScript to find EXPORT button
+            clicked = self.driver.execute_script("""
+                var elements = document.querySelectorAll('button, a, div, span');
+                for (var i = 0; i < elements.length; i++) {
+                    var text = elements[i].textContent.trim().toUpperCase();
+                    if (text === 'EXPORT' || text.includes('EXPORT')) {
+                        // Make sure it's clickable and visible
+                        if (elements[i].offsetParent !== null) {
+                            elements[i].click();
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            """)
+            
+            if clicked:
+                print(f"  ✓ Found EXPORT button")
+                print(f"  ✓ Clicked EXPORT")
+                
+                # Wait for download - check multiple times
+                csv_path = None
+                downloads_folder = os.path.join(os.path.expanduser('~'), 'Downloads')
+                for attempt in range(10):
+                    time.sleep(1)
+                    
+                    # Check both data folder and Downloads folder
+                    for folder in [self.download_dir, downloads_folder]:
+                        if not os.path.exists(folder):
+                            continue
+                        
+                        for f in os.listdir(folder):
+                            if f.endswith('.csv') and not f.endswith('.crdownload'):
+                                full_path = os.path.join(folder, f)
+                                if full_path not in existing_files:
+                                    # Found new file
+                                    csv_path = full_path
+                                    print(f"  ✓ Found downloaded file: {f}")
+                                    break
+                        
+                        if csv_path:
+                            break
+                    
+                    if csv_path:
                         break
-                except:
-                    continue
-            
-            if not export_btn:
+                
+                if csv_path:
+                    with open(csv_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Clean up the downloaded file
+                    try:
+                        os.remove(csv_path)
+                        print(f"  ✓ Cleaned up: {os.path.basename(csv_path)}")
+                    except:
+                        pass
+                    
+                    return content
+                else:
+                    print("  ⚠️ No CSV file found after export (waited 10 seconds)")
+                    print(f"  Checked folders: {self.download_dir}, {downloads_folder}")
+            else:
                 print("  ❌ Could not find EXPORT button")
-                return None
-            
-            # Click and wait for download
-            export_btn.click()
-            print("  ✓ Clicked EXPORT")
-            time.sleep(3)
-            
-            # Check for downloaded file in data directory
-            csv_files = [f for f in os.listdir(self.data_dir) if f.endswith('.csv') and 'stokastic' not in f.lower()]
-            
-            if csv_files:
-                # Get most recent file
-                csv_files.sort(key=lambda x: os.path.getmtime(os.path.join(self.data_dir, x)), reverse=True)
-                csv_path = os.path.join(self.data_dir, csv_files[0])
                 
-                with open(csv_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
-                # Clean up the downloaded file
-                os.remove(csv_path)
-                
-                return content
+                # Debug: list what buttons are visible
+                buttons = self.driver.execute_script("""
+                    var buttons = document.querySelectorAll('button');
+                    var texts = [];
+                    for (var i = 0; i < buttons.length; i++) {
+                        if (buttons[i].offsetParent !== null) {
+                            texts.push(buttons[i].textContent.trim().substring(0, 30));
+                        }
+                    }
+                    return texts;
+                """)
+                print(f"  Visible buttons: {buttons}")
             
             return None
             
         except Exception as e:
             print(f"  ❌ Export error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def select_stat_type(self, stat_type):
         """Select stat type from dropdown (for NFL/NHL)"""
         try:
-            # Find the Stat Type dropdown
-            dropdown_selectors = [
-                "//div[contains(text(), 'Stat Type')]/..//button",
-                "//button[contains(text(), 'Passing')]",
-                "//button[contains(text(), 'Rushing')]",
-                "//button[contains(text(), 'Receiving')]",
-                "//button[contains(text(), 'Skater')]",
-                "//button[contains(text(), 'Goalie')]",
-                "//*[contains(@class, 'select')]//button",
-            ]
+            time.sleep(2)
+            self.driver.save_screenshot(f'debug_before_select_{stat_type.lower()}.png')
             
-            # First try to find and click the dropdown
-            dropdown = None
+            # First, click the STATS tab to make sure we're on the right tab
             try:
-                # Look for dropdown trigger
-                dropdown = self.driver.find_element(By.XPATH, f"//button[contains(text(), '{stat_type}') or contains(., '{stat_type}')]")
-                if not dropdown:
-                    dropdown = self.driver.find_element(By.XPATH, "//div[contains(text(), 'Stat Type')]/..//button")
+                stats_tab = self.driver.execute_script("""
+                    var tabs = document.querySelectorAll('button, a');
+                    for (var i = 0; i < tabs.length; i++) {
+                        if (tabs[i].textContent.trim() === 'STATS') {
+                            tabs[i].click();
+                            return true;
+                        }
+                    }
+                    return false;
+                """)
+                if stats_tab:
+                    print(f"  ✓ Clicked STATS tab")
+                    time.sleep(2)
             except:
                 pass
             
-            if dropdown:
-                dropdown.click()
-                time.sleep(1)
+            # Find the dropdown - look for "Stat Type" label or the dropdown button
+            dropdown_opened = self.driver.execute_script(f"""
+                // Method 1: Find dropdown by looking for container with "Stat Type" text
+                var containers = document.querySelectorAll('div');
+                for (var i = 0; i < containers.length; i++) {{
+                    var text = containers[i].textContent;
+                    if (text.includes('Stat Type')) {{
+                        // Found the container, now find the button inside it
+                        var btn = containers[i].querySelector('button');
+                        if (btn) {{
+                            btn.click();
+                            return 'container';
+                        }}
+                    }}
+                }}
+                
+                // Method 2: Look for any dropdown button that contains stat type names
+                var buttons = document.querySelectorAll('button');
+                for (var i = 0; i < buttons.length; i++) {{
+                    var text = buttons[i].textContent.trim();
+                    if (text === 'Passing' || text === 'Rushing' || text === 'Receiving' || 
+                        text === 'Skater' || text === 'Goalie') {{
+                        buttons[i].click();
+                        return 'button';
+                    }}
+                }}
+                
+                // Method 3: Look for select-like elements
+                var selects = document.querySelectorAll('[class*="select"], [class*="dropdown"], [role="listbox"], [role="combobox"]');
+                for (var i = 0; i < selects.length; i++) {{
+                    selects[i].click();
+                    return 'select';
+                }}
+                
+                return null;
+            """)
             
-            # Now find and click the option
-            option = self.driver.find_element(By.XPATH, f"//li[contains(text(), '{stat_type}')] | //div[contains(text(), '{stat_type}')] | //button[contains(text(), '{stat_type}')]")
-            option.click()
-            print(f"  ✓ Selected {stat_type}")
-            time.sleep(2)
-            return True
+            if dropdown_opened:
+                print(f"  ✓ Opened dropdown via: {dropdown_opened}")
+                time.sleep(1)
+                self.driver.save_screenshot(f'debug_dropdown_open_{stat_type.lower()}.png')
+                
+                # Now click the desired option
+                option_clicked = self.driver.execute_script(f"""
+                    // Wait a moment for dropdown to render
+                    var items = document.querySelectorAll('li, div[role="option"], button, span, div');
+                    for (var i = 0; i < items.length; i++) {{
+                        var text = items[i].textContent.trim();
+                        if (text === '{stat_type}') {{
+                            items[i].click();
+                            return true;
+                        }}
+                    }}
+                    
+                    // Try clicking by partial match
+                    for (var i = 0; i < items.length; i++) {{
+                        var text = items[i].textContent.trim();
+                        if (text.includes('{stat_type}')) {{
+                            items[i].click();
+                            return true;
+                        }}
+                    }}
+                    
+                    return false;
+                """)
+                
+                if option_clicked:
+                    print(f"  ✓ Selected {stat_type}")
+                    time.sleep(2)
+                    return True
+            else:
+                print(f"  Could not find dropdown to open")
+                
+                # Debug: Print all buttons on page
+                buttons_text = self.driver.execute_script("""
+                    var buttons = document.querySelectorAll('button');
+                    var texts = [];
+                    for (var i = 0; i < buttons.length; i++) {
+                        texts.push(buttons[i].textContent.trim().substring(0, 50));
+                    }
+                    return texts.slice(0, 20);
+                """)
+                print(f"  Buttons found: {buttons_text}")
+            
+            # If we couldn't select, try to export anyway - might already be on the right stat
+            return False
             
         except Exception as e:
-            print(f"  ⚠️ Could not select {stat_type}: {str(e)}")
+            print(f"  ⚠️ Error selecting {stat_type}: {str(e)}")
             return False
     
     def save_historical(self, sport, stat_type, csv_content):
@@ -458,25 +583,158 @@ class StokasticScraper:
             print("  Loading page...")
             time.sleep(5)
             
-            # Make sure we're on STATS tab
+            self.driver.save_screenshot('debug_nfl_before_stats.png')
+            
+            # Click STATS tab using Selenium directly
+            from selenium.webdriver.common.by import By
+            
+            clicked_stats = False
+            
+            # Method 1: Find by exact text using XPath
             try:
-                stats_tab = self.driver.find_element(By.XPATH, "//button[contains(text(), 'STATS')] | //a[contains(text(), 'STATS')]")
+                stats_tab = self.driver.find_element(By.XPATH, "//div[text()='STATS'] | //span[text()='STATS'] | //button[text()='STATS'] | //a[text()='STATS']")
                 stats_tab.click()
-                time.sleep(2)
-            except:
-                pass
+                clicked_stats = True
+                print("  ✓ Clicked STATS tab (XPath exact)")
+            except Exception as e:
+                print(f"  XPath exact failed: {e}")
+            
+            # Method 2: Try partial text
+            if not clicked_stats:
+                try:
+                    stats_tab = self.driver.find_element(By.XPATH, "//*[contains(text(),'STATS')]")
+                    stats_tab.click()
+                    clicked_stats = True
+                    print("  ✓ Clicked STATS tab (XPath contains)")
+                except Exception as e:
+                    print(f"  XPath contains failed: {e}")
+            
+            # Method 3: Use JavaScript with more specific targeting
+            if not clicked_stats:
+                clicked_stats = self.driver.execute_script("""
+                    // Find all elements and look for one that's just "STATS"
+                    var walker = document.createTreeWalker(
+                        document.body,
+                        NodeFilter.SHOW_TEXT,
+                        null,
+                        false
+                    );
+                    
+                    while (walker.nextNode()) {
+                        if (walker.currentNode.textContent.trim() === 'STATS') {
+                            var parent = walker.currentNode.parentElement;
+                            console.log('Found STATS, parent tag:', parent.tagName);
+                            parent.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                """)
+                if clicked_stats:
+                    print("  ✓ Clicked STATS tab (JS TreeWalker)")
+            
+            # Method 4: Click by position - STATS is the 3rd tab
+            if not clicked_stats:
+                try:
+                    # Get all tab-like elements near PROJECTIONS
+                    tabs = self.driver.execute_script("""
+                        var projTab = null;
+                        var all = document.querySelectorAll('*');
+                        for (var i = 0; i < all.length; i++) {
+                            if (all[i].textContent.trim() === 'PROJECTIONS' && 
+                                all[i].childNodes.length === 1) {
+                                projTab = all[i];
+                                break;
+                            }
+                        }
+                        if (projTab) {
+                            // Get siblings
+                            var parent = projTab.parentElement;
+                            var children = parent.children;
+                            for (var i = 0; i < children.length; i++) {
+                                if (children[i].textContent.trim() === 'STATS') {
+                                    children[i].click();
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    """)
+                    if tabs:
+                        clicked_stats = True
+                        print("  ✓ Clicked STATS tab (sibling method)")
+                except:
+                    pass
+            
+            if not clicked_stats:
+                print("  ❌ Could not click STATS tab")
+                # List what we found
+                tab_info = self.driver.execute_script("""
+                    var results = [];
+                    var all = document.querySelectorAll('*');
+                    for (var i = 0; i < all.length; i++) {
+                        var text = all[i].textContent.trim();
+                        if (text === 'STATS' || text === 'PROJECTIONS' || text === 'TOP STACKS') {
+                            results.push({
+                                tag: all[i].tagName,
+                                text: text,
+                                children: all[i].childNodes.length
+                            });
+                        }
+                    }
+                    return results.slice(0, 10);
+                """)
+                print(f"  Tab elements found: {tab_info}")
+            
+            time.sleep(4)
+            self.driver.save_screenshot('debug_nfl_after_stats_click.png')
+            
+            # Verify we're on STATS tab
+            has_stat_type = 'Stat Type' in self.driver.page_source
+            if has_stat_type:
+                print("  ✓ Confirmed: On STATS tab")
+            else:
+                print("  ⚠️ May not be on STATS tab")
             
             for stat_type in stat_types:
                 print(f"\n  --- {stat_type} ---")
                 
-                # Select stat type
-                if not self.select_stat_type(stat_type):
-                    continue
+                # Click the Stat Type dropdown
+                dropdown_opened = self.driver.execute_script("""
+                    var buttons = document.querySelectorAll('button');
+                    for (var i = 0; i < buttons.length; i++) {
+                        var text = buttons[i].textContent.trim();
+                        if (text === 'Passing' || text === 'Rushing' || text === 'Receiving') {
+                            buttons[i].click();
+                            return text;
+                        }
+                    }
+                    return null;
+                """)
                 
-                time.sleep(2)
-                self.driver.save_screenshot(f'debug_stokastic_nfl_{stat_type.lower()}.png')
+                if dropdown_opened:
+                    print(f"  ✓ Opened dropdown (was: {dropdown_opened})")
+                    time.sleep(1)
+                    
+                    selected = self.driver.execute_script(f"""
+                        var options = document.querySelectorAll('li, [role="option"], [role="menuitem"]');
+                        for (var i = 0; i < options.length; i++) {{
+                            if (options[i].textContent.trim() === '{stat_type}') {{
+                                options[i].click();
+                                return true;
+                            }}
+                        }}
+                        return false;
+                    """)
+                    
+                    if selected:
+                        print(f"  ✓ Selected {stat_type}")
+                    time.sleep(2)
+                else:
+                    print(f"  ⚠️ Could not find stat type dropdown")
                 
-                # Click export
+                self.driver.save_screenshot(f'debug_nfl_{stat_type.lower()}.png')
+                
                 csv_content = self.click_export_button()
                 
                 if csv_content:
@@ -497,6 +755,8 @@ class StokasticScraper:
             
         except Exception as e:
             print(f"❌ Error scraping NFL: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def git_commit_and_push(self):

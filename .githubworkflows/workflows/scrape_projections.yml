@@ -1,0 +1,57 @@
+name: Scrape Projections
+
+on:
+  schedule:
+    # Hourly 8 AM - 1 PM ET (1 PM - 6 PM UTC)
+    - cron: '0 13,14,15,16,17,18 * * *'
+    # Every 15 min 1 PM - 6 PM ET (6 PM - 11 PM UTC)
+    - cron: '0,15,30,45 18,19,20,21,22,23 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - uses: browser-actions/setup-chrome@v1
+      
+      - name: Install dependencies
+        run: pip install selenium webdriver-manager pandas requests beautifulsoup4
+      
+      - name: Create config
+        env:
+          RG_USER: ${{ secrets.RG_USERNAME }}
+          RG_PASS: ${{ secrets.RG_PASSWORD }}
+          STOK_USER: ${{ secrets.STOKASTIC_USERNAME }}
+          STOK_PASS: ${{ secrets.STOKASTIC_PASSWORD }}
+        run: |
+          echo "{\"rg_username\":\"$RG_USER\",\"rg_password\":\"$RG_PASS\",\"stokastic_username\":\"$STOK_USER\",\"stokastic_password\":\"$STOK_PASS\"}" > scraper_config.json
+      
+      - name: Run RotoGrinders scraper
+        run: python rotogrinders_scraper_github.py --headless
+        continue-on-error: true
+      
+      - name: Run Stokastic scraper
+        run: python stokastic_scraper.py --headless --sport nba
+        continue-on-error: true
+      
+      - name: Run Stokastic NHL scraper
+        run: python stokastic_scraper.py --headless --sport nhl
+        continue-on-error: true
+      
+      - name: Push changes
+        run: |
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git add data/
+          git diff --staged --quiet || git commit -m "Auto-update projections $(date +'%Y-%m-%d %H:%M')"
+          git push
